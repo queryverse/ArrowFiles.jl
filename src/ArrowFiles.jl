@@ -35,6 +35,19 @@ end
 IteratorInterfaceExtensions.isiterable(x::ArrowFile) = true
 TableTraits.isiterabletable(x::ArrowFile) = true
 TableTraits.supports_get_columns_copy_using_missing(x::ArrowFile) = true
+TableTraits.supports_get_columns_view(x::ArrowFile) = true
+
+# Tables.jl interface, delegated to Arrow.Table. Its columns are views into the
+# memory-mapped file, so `Tables.columns` is O(1) and never copies; `Tables.rows` then
+# comes from Tables.jl's RowIterator over those columns, and `Tables.partitions` yields
+# one table per record batch. Arrow.jl wraps the result in `Tables.CopiedColumns`, so
+# sinks like DataFrames take the (immutable) columns as-is; pass `copycols=true` there
+# to materialize mutable Vectors.
+Tables.istable(::Type{ArrowFile}) = true
+Tables.columnaccess(::Type{ArrowFile}) = true
+Tables.columns(file::ArrowFile) = Tables.columns(Arrow.Table(file.filename))
+Tables.schema(file::ArrowFile) = Tables.schema(Arrow.Table(file.filename))
+Tables.partitions(file::ArrowFile) = Tables.partitions(Arrow.Table(file.filename))
 
 # Arrow.jl already hands back columns whose eltype is `Union{T,Missing}`, so unlike the
 # Feather V1 path there is nothing to wrap on the way in.
@@ -43,6 +56,13 @@ function _readcolumns(filename::AbstractString)
     names = collect(Symbol, Tables.columnnames(t))
     columns = Any[Tables.getcolumn(t, n) for n in names]
     return columns, names
+end
+
+# The TableTraits view trait: the same Arrow-backed columns, not copied. Callers must
+# treat them as read-only; they alias the mapped file.
+function TableTraits.get_columns_view(file::ArrowFile)
+    columns, names = _readcolumns(file.filename)
+    return NamedTuple{(names...,)}((columns...,))
 end
 
 function IteratorInterfaceExtensions.getiterator(file::ArrowFile)

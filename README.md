@@ -18,7 +18,13 @@ using ArrowFiles, DataFrames
 df = DataFrame(load("data.arrow"))
 ```
 
-`load` returns a struct that is an [IterableTable](https://github.com/queryverse/IterableTables.jl), so it can be passed to any IterableTables sink.
+`load` returns a struct that implements the [Tables.jl](https://github.com/JuliaData/Tables.jl) interface and is also an [IterableTable](https://github.com/queryverse/IterableTables.jl), so it can be passed to any Tables.jl or IterableTables sink.
+
+The Tables.jl path is zero-copy: `Tables.columns`, `Tables.rows`, `Tables.schema` and `Tables.partitions` (one per record batch) delegate to `Arrow.Table`, whose columns are views into the memory-mapped file. Those columns are immutable, and sinks like DataFrames take them as they are, exactly as `DataFrame(Arrow.Table("data.arrow"))` does. To get ordinary mutable `Vector` columns, ask the sink for a copy:
+
+```julia
+df = DataFrame(load("data.arrow"); copycols=true)
+```
 
 ### Save an Arrow file
 

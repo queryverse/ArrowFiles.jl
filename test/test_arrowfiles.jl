@@ -116,6 +116,83 @@ a   │ b
     @test occursin("\"schema\"", sprint(io -> show(io, MIME"application/vnd.dataresource+json"(), af)))
 end
 
+@testitem "Tables.jl interface" setup=[RegisterWithFileIO] begin
+    using Arrow
+    using Tables
+    using TableTraits
+    using FileIO
+
+    t1 = (a=[1, 2, 3], b=["x", "y", "z"], c=[1.5, missing, 3.5])
+    t2 = (a=[4, 5], b=["u", "v"], c=[missing, 5.5])
+
+    # One file with a single record batch, one with two.
+    single = tempname() * ".arrow"
+    Arrow.write(single, t1)
+    multi = tempname() * ".arrow"
+    Arrow.write(multi, Tables.partitioner((t1, t2)))
+
+    @test Tables.istable(ArrowFiles.ArrowFile)
+    @test Tables.columnaccess(ArrowFiles.ArrowFile)
+
+    af = load(single)
+    @test Tables.istable(af)
+
+    # Columns are Arrow's own views into the mapped file, not copies.
+    cols = Tables.columns(af)
+    @test cols isa Tables.CopiedColumns
+    @test collect(Tables.columnnames(cols)) == [:a, :b, :c]
+    for n in Tables.columnnames(cols)
+        @test Tables.getcolumn(cols, n) isa Arrow.ArrowVector
+    end
+    @test Tables.getcolumn(cols, :a) == [1, 2, 3]
+    @test isequal(Tables.getcolumn(cols, :c), [1.5, missing, 3.5])
+
+    sch = Tables.schema(af)
+    @test collect(sch.names) == [:a, :b, :c]
+    @test collect(sch.types) == [Int64, String, Union{Missing,Float64}]
+
+    # Rows come from Tables.jl's RowIterator over the Arrow columns: no DataValue.
+    rows = Tables.rows(af)
+    @test eltype(rows) <: Tables.ColumnsRow
+    r = collect(rows)
+    @test length(r) == 3
+    @test [x.a for x in r] == [1, 2, 3]
+    @test [x.b for x in r] == ["x", "y", "z"]
+    @test r[1].c == 1.5
+    @test r[2].c === missing
+
+    ct = Tables.columntable(af)
+    @test ct.a == [1, 2, 3]
+    @test ct.a isa Arrow.ArrowVector
+
+    # Arrow.TablePartitions iterates but defines neither length nor IteratorSize,
+    # so gather partitions by iteration rather than collect.
+    gatherpartitions(x) = (ps = Any[]; for p in Tables.partitions(x); push!(ps, p); end; ps)
+    @test length(gatherpartitions(af)) == 1
+
+    # The TableTraits view trait hands out the same uncopied columns.
+    @test TableTraits.supports_get_columns_view(af)
+    v = TableTraits.get_columns_view(af)
+    @test v isa NamedTuple
+    @test keys(v) == (:a, :b, :c)
+    @test v.a isa Arrow.ArrowVector
+    @test eltype(v.c) == Union{Missing,Float64}
+
+    # The copy trait still materializes owned Vectors for Queryverse sinks.
+    cp = TableTraits.get_columns_copy_using_missing(af)
+    @test cp.a isa Vector{Int64}
+    @test cp.c isa Vector{Union{Missing,Float64}}
+
+    # Multiple record batches show up as Tables.jl partitions.
+    mf = load(multi)
+    parts = gatherpartitions(mf)
+    @test length(parts) == 2
+    @test parts[1].a == [1, 2, 3]
+    @test parts[2].a == [4, 5]
+    @test Tables.columntable(mf).a == [1, 2, 3, 4, 5]
+    @test [x.b for x in Tables.rows(mf)] == ["x", "y", "z", "u", "v"]
+end
+
 @testitem "Missing Conversion" begin
     using DataValues
 
